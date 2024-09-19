@@ -582,10 +582,9 @@ try:
                     logging.error(f"Error generating payload URL for {url} with payload {payload}: {str(e)}")
                 return url_combinations
 
-            async def fetch(self, sem: asyncio.Semaphore, session: aiohttp.ClientSession, url: str, driver: webdriver.Chrome):
+            async def fetch(self, sem: asyncio.Semaphore, session: aiohttp.ClientSession, url: str, driver):
                 async with sem:
                     try:
-                        response_text = ""
                         async with session.get(url, allow_redirects=True) as resp:
                             response_headers = resp.headers
                             content_type = response_headers.get("Content-Type", "")
@@ -599,21 +598,13 @@ try:
                                  return (False, url)
 
                          # Use Selenium to check for XSS
-                        driver.get(url)
-                        try:
-                             WebDriverWait(driver, 1).until(EC.alert_is_present())
-                             alert = driver.switch_to.alert
-                             alert.dismiss()
-                             return (True, url)
-                        except:
-                             return (False, url)
-                        finally:
-                            await driver_queue.put(driver)
+                        await asyncio.get_event_loop().run_in_executor(None, self.check_xss, driver, url)
+                        return(True, url)
 
                     except asyncio.TimeoutError:
-                     logging.warning(f"Request timed out for {url}")
+                        logging.warning(f"Request timed out for {url}")
                     except Exception as e:
-                     logging.error(f"Error fetching {url}: {str(e)}")
+                        logging.error(f"Error fetching {url}: {str(e)}")
         
                     await asyncio.sleep(1)
                     return (False, url)
@@ -628,6 +619,16 @@ try:
                     else:
                         print(Color.RED + f"Not vulnerable: {url}")
 
+            def check_xss(self, driver, url):
+                try:
+                    driver.get(url)
+                    WebDriverWait(driver, 1).until(EC.alert_is_present())
+                    alert = driver.switch_to.alert
+                    alert.dismiss()
+                    return True
+                except TimeoutException:
+                    return False
+                
             async def scan(self):
                 sem = asyncio.Semaphore(self.concurrency)
                 timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -637,11 +638,7 @@ try:
                 chrome_options.add_argument("--disable-gpu")
                 service = ChromeService(executable_path=ChromeDriverManager().install())
 
-                # Create a queue of WebDriver instances
-                driver_queue = asyncio.Queue()
-                for _ in range(self.num_browsers):
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    await driver_queue.put(driver)
+                drivers = [webdriver.chrome(service=service, options=chrome_options)for _ in range(self.num_browsers)]
 
                 try:
                     async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=False, limit=0, enable_cleanup_closed=True)) as session:
@@ -650,8 +647,9 @@ try:
                             tasks = []
                             for url in self.urls:
                                 urls_with_payload = self.generate_payload_urls(url.strip(), payload)
-                                for payload_url in urls_with_payload:
-                                    tasks.append(self.fetch(sem, session, payload_url, driver_queue))
+                                for i, payload_url in enumerate(urls_with_payload):
+                                    driver = drivers[i % len(drivers)]
+                                    tasks.append(self.fetch(sem, session, payload_url, driver))
                     
                             results = await asyncio.gather(*tasks)
                             self.process_results(results)
@@ -664,11 +662,9 @@ try:
                                            break
                                        self.first_vulnerability_prompt = False
                                     elif not self.auto_continue:
-                                        self.first_vulnerability_prompt = False
+                                       self.first_vulnerability_prompt = False
                 finally:
-                    # Close all WebDriver instances
-                    while not driver_queue.empty():
-                        driver = await driver_queue.get()
+                    for driver in drivers
                         driver.quit()
 
 
@@ -683,9 +679,9 @@ try:
                 for is_vulnerable, url in results:
                     self.totalScanned += 1
                     if is_vulnerable:
-                       print(Color.GREEN + f"Vulnerable URL : {url}")
-                       self.injectables.append(url)
-                       self.totalFound += 1
+                        print(Color.GREEN + f"Vulnerable URL : {url}")
+                        self.injectables.append(url)
+                        self.totalFound += 1
                     else:
                         print(Color.RED + f"Not vulnerable: {url}")
                 
