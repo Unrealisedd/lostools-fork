@@ -638,7 +638,7 @@ try:
                 chrome_options.add_argument("--disable-gpu")
                 service = ChromeService(executable_path=ChromeDriverManager().install())
 
-                drivers = [webdriver.chrome(service=service, options=chrome_options)for _ in range(self.num_browsers)]
+                drivers = [webdriver.Chrome(service=service, options=chrome_options) for _ in range(self.num_browsers)]
 
                 try:
                     async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=False, limit=0, enable_cleanup_closed=True)) as session:
