@@ -664,7 +664,7 @@ try:
                                     elif not self.auto_continue:
                                        self.first_vulnerability_prompt = False
                 finally:
-                    for driver in drivers
+                    for driver in drivers:
                         driver.quit()
 
 
