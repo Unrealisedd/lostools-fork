@@ -580,83 +580,88 @@ try:
                     logging.error(f"Error generating payload URL for {url} with payload {payload}: {str(e)}")
                 return url_combinations
 
-            async def fetch(self, sem: asyncio.Semaphore, session: aiohttp.ClientSession, url: str):
-                async with sem:
-                    try:
-                        response_text = ""
-                        async with session.get(url, allow_redirects=True) as resp:
-                            response_headers = resp.headers
-                            content_type = response_headers.get("Content-Type", "")
-                            content_length = int(response_headers.get("Content-Length", -1))
+            async def fetch(self, sem: asyncio.Semaphore, session: aiohttp.ClientSession, url: str, driver: webdriver.Chrome):
+                 async with sem:
+                     try:
+                         response_text = ""
+                         async with session.get(url, allow_redirects=True) as resp:
+                             response_headers = resp.headers
+                             content_type = response_headers.get("Content-Type", "")
+                             content_length = int(response_headers.get("Content-Length", -1))
 
-                            if "text/html" in content_type and (content_length < 0 or content_length <= 1000000):
-                                content = await resp.read()
-                                encoding = 'utf-8'
-                                response_text = content.decode(encoding, errors="ignore")
-                            else:
-                                logging.info(f"Skipping URL due to content type or size: {url}")
-                    except asyncio.TimeoutError:
-                        logging.warning(f"Request timed out for {url}")
-                    except Exception as e:
-                        logging.error(f"Error fetching {url}: {str(e)}")
-                            
-                    await asyncio.sleep(1)
-                    return (response_text, url)
+                             if "text/html" in content_type and (content_length < 0 or content_length <= 1000000):
+                                 content = await resp.read()
+                                 encoding = 'utf-8'
+                                 response_text = content.decode(encoding, errors="ignore")
+                             else:
+                                 logging.info(f"Skipping URL due to content type or size: {url}")
+                                 return (False, url)
+
+                         # Use Selenium to check for XSS
+                         driver.get(url)
+                         try:
+                             WebDriverWait(driver, 1).until(EC.alert_is_present())
+                             alert = driver.switch_to.alert
+                             alert.dismiss()
+                             return (True, url)
+                         except:
+                             return (False, url)
+
+                     except asyncio.TimeoutError:
+                         logging.warning(f"Request timed out for {url}")
+                     except Exception as e:
+                         logging.error(f"Error fetching {url}: {str(e)}")
+        
+                     await asyncio.sleep(1)
+                     return (False, url)
 
             def process_tasks(self, done):
-                for response_text, url in done:
+                for is_vulnerable, url in done:
                     self.totalScanned += 1
-                    chrome_options = Options()
-                    chrome_options.add_argument("--headless") 
-                    chrome_options.add_argument("--no-sandbox")
-                    chrome_options.add_argument("--disable-gpu")
-                    service = ChromeService(executable_path=ChromeDriverManager().install())
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                    try:
-                        driver.get(url)
-
-                        try:
-                            WebDriverWait(driver, 1).until(EC.alert_is_present())
-                            alert = driver.switch_to.alert
-                            print(Color.GREEN + f"Vulnerable URL : {url}")
-                            alert.dismiss() 
-                            self.injectables.append(url)
-                        except:
-                            print(Color.RED + "Not vulnerable")
-                    finally:
-                        driver.quit()
+                    if is_vulnerable:
+                        print(Color.GREEN + f"Vulnerable URL : {url}")
+                        self.injectables.append(url)
+                        self.totalFound += 1
+                    else:
+                        print(Color.RED + f"Not vulnerable: {url}")
 
             async def scan(self):
-                sem = asyncio.Semaphore(self.concurrency)
-                timeout = aiohttp.ClientTimeout(total=self.timeout)
+                 sem = asyncio.Semaphore(self.concurrency)
+                 timeout = aiohttp.ClientTimeout(total=self.timeout)
+                 chrome_options = Options()
+                 chrome_options.add_argument("--headless")
+                 chrome_options.add_argument("--no-sandbox")
+                 chrome_options.add_argument("--disable-gpu")
+                 service = ChromeService(executable_path=ChromeDriverManager().install())
+                 driver = webdriver.Chrome(service=service, options=chrome_options)
 
-                async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=False, limit=0, enable_cleanup_closed=True)) as session:
-                    for payload in self.payloads:
-                        print(f"{Fore.YELLOW}[i] Scanning with payload: {payload}\n")
-                        pending = []
-                        for url in self.urls:
-                            urls_with_payload = self.generate_payload_urls(url.strip(), payload)
-                            for payload_url in urls_with_payload:
-                                pending.append(asyncio.ensure_future(self.fetch(sem, session, payload_url)))
-
-                            if len(pending) >= self.concurrency:
-                                done = await asyncio.gather(*pending)
-                                self.process_tasks(done)
-                                pending = []
-
-                        if pending:
-                            done = await asyncio.gather(*pending)
-                            self.process_tasks(done)
-
-                        if self.payload_file:
-                            if self.totalFound > 0:
-                                if self.first_vulnerability_prompt and not self.auto_continue:
-                                    continue_scan = input(f"{Fore.CYAN}\n[?] Vulnerability found. Do you want to continue testing other payloads? (y/n, press Enter for n): ").strip().lower()
-                                    if continue_scan != 'y':
-                                        break
-                                    self.first_vulnerability_prompt = False
-                                elif not self.auto_continue:
-                                    self.first_vulnerability_prompt = False
+                 try:
+                     async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=False, limit=0, enable_cleanup_closed=True)) as session:
+                         for payload in self.payloads:
+                             print(f"{Fore.YELLOW}[i] Scanning with payload: {payload}\n")
+                             pending = []
+                             for url in self.urls:
+                                 urls_with_payload = self.generate_payload_urls(url.strip(), payload)
+                                 for payload_url in urls_with_payload:
+                                     pending.append(asyncio.ensure_future(self.fetch(sem, session, payload_url, driver)))
+                                 if len(pending) >= self.concurrency:
+                                     done = await asyncio.gather(*pending)
+                                     self.process_tasks(done)
+                                     pending = []
+                             if pending:
+                                 done = await asyncio.gather(*pending)
+                                 self.process_tasks(done)
+                             if self.payload_file:
+                                 if self.totalFound > 0:
+                                     if self.first_vulnerability_prompt and not self.auto_continue:
+                                         continue_scan = input(f"{Fore.CYAN}\n[?] Vulnerability found. Do you want to continue testing other payloads? (y/n, press Enter for n): ").strip().lower()
+                                         if continue_scan != 'y':
+                                             break
+                                         self.first_vulnerability_prompt = False
+                                     elif not self.auto_continue:
+                                         self.first_vulnerability_prompt = False
+                 finally:
+                     driver.quit()
 
 
             def save_injectables_to_file(self):
@@ -808,6 +813,10 @@ try:
             options.add_argument("--disable-extensions")
             options.add_argument("--window-size=1920,1080")
             from selenium.webdriver.chrome.service import Service
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.set_page_load_timeout(10)
+            return driver
 
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
@@ -815,29 +824,32 @@ try:
             return driver
 
         def check_payload_with_selenium(url, payload):
-            target_url = f"{url}{payload.strip()}"
-            driver = None
+            driver = get_chrome_driver()
+            results = []
             try:
-                driver = get_chrome_driver()
-                print(Fore.YELLOW + f"[i] Testing payload: {payload.strip()} on {target_url}")
-                driver.get(target_url)
-                time.sleep(2)
-                current_url = driver.current_url
+                for payload in payloads:
+                    target_url = f"{url}{payload.strip()}"
+                    print(Fore.YELLOW + f"[i] Testing payload: {payload.strip()} on {target_url}")
+                    try:
+                        driver.get(target_url)
+                        time.sleep(2)
+                        current_url = driver.current_url
                 
-                if current_url == "https://www.google.com/":
-                    return Fore.GREEN + f"[+] Vulnerable: {target_url} redirects to {current_url}", True
-                else:
-                    return Fore.RED + f"[-] Not Vulnerable: {target_url} (redirects to {current_url})", False
+                        if current_url == "https://www.google.com/":
+                            return Fore.GREEN + f"[+] Vulnerable: {target_url} redirects to {current_url}", True
+                        else:
+                            return Fore.RED + f"[-] Not Vulnerable: {target_url} (redirects to {current_url})", False
 
-            except TimeoutException:
-                return Fore.RED + f"[-] Timeout occurred while testing payload: {payload.strip()} on {target_url}", False
+                    except TimeoutException:
+                        return Fore.RED + f"[-] Timeout occurred while testing payload: {payload.strip()} on {target_url}", False
 
-            except Exception as e:
-                return Fore.RED + f"[-] Error for payload {payload}: {str(e)}", False
+                    except Exception as e:
+                        return Fore.RED + f"[-] Error for payload {payload}: {str(e)}", False
 
             finally:
-                if driver:
-                    driver.quit()
+                driver.quit()
+            return results
+                    
 
         def test_open_redirect(url, payloads, max_threads=5):
             found_vulnerabilities = 0
